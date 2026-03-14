@@ -1,0 +1,53 @@
+{
+  "name": "complykit",
+  "version": "0.0.1",
+  "description": "Cookie compliance checker for CI — static analysis + runtime browser audit",
+  "author": "André Virdarson",
+  "license": "MIT",
+  "keywords": [
+    "cookie",
+    "compliance",
+    "gdpr",
+    "privacy",
+    "ci",
+    "security",
+    "static-analysis",
+    "audit"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/andrevirdarson/complykit.git"
+  },
+  "bugs": {
+    "url": "https://github.com/andrevirdarson/complykit/issues"
+  },
+  "type": "module",
+  "bin": {
+    "complykit": "./dist/cli.js"
+  },
+  "scripts": {
+    "prepare": "bun run build",
+    "build": "bun build src/cli.ts --outdir dist --target bun --sourcemap=external --external electron --external chromium-bidi",
+    "start": "bun run src/cli.ts",
+    "dev": "bun run src/cli.ts",
+    "lint": "oxlint --config oxlint.json src/",
+    "format": "biome format --write src/",
+    "format:check": "biome format src/",
+    "check": "bun run lint && bun run format:check",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "commander": "^12.0.0",
+    "js-yaml": "^4.1.0",
+    "oxc-parser": "^0.118.0",
+    "playwright": "^1.44.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.7",
+    "@types/bun": "^1.3.10",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^25.5.0",
+    "oxlint": "^0.4.0",
+    "typescript": "^5.4.0"
+  }
+}

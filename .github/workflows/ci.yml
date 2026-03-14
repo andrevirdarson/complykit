@@ -1,0 +1,60 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  UPLOAD_SARIF: ${{ vars.UPLOAD_SARIF || 'false' }}
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  comply:
+    name: Build and test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build
+        run: bun run build
+
+      - name: Lint and format check
+        run: bun run check
+
+      - name: Tests
+        run: bun test
+
+      # -----------------------------------------------------------------------
+      # Static analysis — scan the source tree
+      # Fails with exit code 1 if any cookie writes are found without guards.
+      # -----------------------------------------------------------------------
+      - name: Static scan
+        run: bun dist/cli.js scan src/
+
+      - name: Static scan (SARIF)
+        if: ${{ always() && env.UPLOAD_SARIF == 'true' }}
+        run: bun dist/cli.js scan src/ --format sarif --output complykit-scan.sarif
+        continue-on-error: true
+
+      - name: Upload scan SARIF
+        if: ${{ always() && env.UPLOAD_SARIF == 'true' }}
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: complykit-scan.sarif
+          category: complykit-scan

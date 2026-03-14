@@ -1,0 +1,11 @@
+# complykit configuration
+# Cookies that are permitted to be set before user consent is given.
+allowedBeforeConsent:
+  - session
+  - consent
+  - csrf
+  - __Host-csrf
+
+# Pages the audit command will visit (relative paths, appended to the base URL).
+crawlPages:
+  - /
