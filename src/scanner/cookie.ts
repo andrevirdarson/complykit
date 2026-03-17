@@ -153,6 +153,45 @@ function stringLiteralValue(node: OxcNode): string | null {
   return null
 }
 
+// dangerouslySetInnerHTML={{ __html: "...document.cookie..." }} — cookie or
+// tracker code hidden inside a raw HTML string bypasses the normal AST checks.
+const DANGEROUS_HTML_PATTERNS = [
+  /document\.cookie\s*=/,
+  /Set-Cookie:/i,
+  /localStorage\.setItem/,
+  /sessionStorage\.setItem/,
+]
+
+function extractDangerousHtmlValue(node: OxcNode): string | null {
+  if (node.type !== 'JSXAttribute') return null
+  const name = node.name?.name ?? node.name?.value
+  if (name !== 'dangerouslySetInnerHTML') return null
+
+  // The value is a JSXExpressionContainer wrapping an ObjectExpression: {{ __html: "..." }}
+  const expr = node.value?.expression
+  if (expr?.type !== 'ObjectExpression') return null
+
+  for (const prop of expr.properties ?? []) {
+    const key = prop.key?.name ?? prop.key?.value
+    if (key !== '__html') continue
+    // String literal
+    if (prop.value?.type === 'StringLiteral' || prop.value?.type === 'Literal') {
+      return (prop.value.value as string) ?? null
+    }
+    // Template literal with no expressions (static)
+    if (prop.value?.type === 'TemplateLiteral' && prop.value.quasis?.length === 1) {
+      return prop.value.quasis[0]?.value?.raw ?? prop.value.quasis[0]?.value?.cooked ?? null
+    }
+  }
+  return null
+}
+
+function isDangerousInnerHTMLCookie(node: OxcNode): boolean {
+  const html = extractDangerousHtmlValue(node)
+  if (html === null) return false
+  return DANGEROUS_HTML_PATTERNS.some((p) => p.test(html))
+}
+
 // el.src = "<tracker url>"  — where el might be any identifier or the result
 // of createElement. We flag any AssignmentExpression where the left side is
 // `<anything>.src` and the right side is a string literal matching a tracker.
@@ -197,6 +236,8 @@ function tryGetViolation(node: OxcNode): string | null {
   } else if (isTrackerSrcAssignment(node)) {
     const url = stringLiteralValue(node.right) ?? ''
     return `Third-party tracker script injected without consent guard (${url})`
+  } else if (isDangerousInnerHTMLCookie(node)) {
+    return 'Cookie or storage written via dangerouslySetInnerHTML without consent guard'
   }
 
   return null

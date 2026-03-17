@@ -10,6 +10,7 @@ import {
   RULE_SET_COOKIE_HEADER,
   RULE_UNEXPECTED_COOKIE_HEADER,
   RULE_UNEXPECTED_COOKIE_CONTEXT,
+  RULE_DANGEROUS_INNER_HTML,
   RULE_GENERIC,
 } from '../ruleIds.js'
 
@@ -41,6 +42,7 @@ function ruleIdFromMessage(message: string): string {
   if (message.includes('localStorage')) return RULE_LOCAL_STORAGE
   if (message.includes('sessionStorage')) return RULE_SESSION_STORAGE
   if (message.includes('tracker')) return RULE_TRACKER_SCRIPT
+  if (message.includes('dangerouslySetInnerHTML')) return RULE_DANGEROUS_INNER_HTML
   if (message.includes('Set-Cookie')) return RULE_SET_COOKIE_HEADER
   return RULE_GENERIC
 }

@@ -148,6 +148,84 @@ export default function Page() {
 })
 
 // ---------------------------------------------------------------------------
+// dangerouslySetInnerHTML
+// ---------------------------------------------------------------------------
+
+describe('dangerouslySetInnerHTML with cookie/storage writes', () => {
+  it('flags dangerouslySetInnerHTML with document.cookie assignment', () => {
+    const source = `
+export default function Page() {
+  return <script dangerouslySetInnerHTML={{ __html: \`document.cookie = "tracking_id=abc123; max-age=31536000";\` }} />;
+}
+`
+    const result = scanFileAST('page.tsx', source)
+    expect(result).toHaveLength(1)
+    expect(result[0]?.message).toContain('dangerouslySetInnerHTML')
+  })
+
+  it('flags dangerouslySetInnerHTML with string literal value', () => {
+    const source = `
+export default function Page() {
+  return <div dangerouslySetInnerHTML={{ __html: "document.cookie = 'x=1';" }} />;
+}
+`
+    const result = scanFileAST('page.tsx', source)
+    expect(result).toHaveLength(1)
+  })
+
+  it('flags dangerouslySetInnerHTML with localStorage.setItem', () => {
+    const source = `
+export default function Page() {
+  return <script dangerouslySetInnerHTML={{ __html: \`localStorage.setItem("uid", "123");\` }} />;
+}
+`
+    const result = scanFileAST('page.tsx', source)
+    expect(result).toHaveLength(1)
+  })
+
+  it('flags dangerouslySetInnerHTML with Set-Cookie header', () => {
+    const source = `
+export default function Page() {
+  return <div dangerouslySetInnerHTML={{ __html: "Set-Cookie: foo=bar" }} />;
+}
+`
+    const result = scanFileAST('page.tsx', source)
+    expect(result).toHaveLength(1)
+  })
+
+  it('does not flag dangerouslySetInnerHTML with safe content', () => {
+    const source = `
+export default function Page() {
+  return <div dangerouslySetInnerHTML={{ __html: "<p>Hello world</p>" }} />;
+}
+`
+    const result = scanFileAST('page.tsx', source)
+    expect(result).toHaveLength(0)
+  })
+
+  it('does not flag other JSX attributes', () => {
+    const source = `
+export default function Page() {
+  return <div className="document.cookie = x" />;
+}
+`
+    const result = scanFileAST('page.tsx', source)
+    expect(result).toHaveLength(0)
+  })
+
+  it('suppresses with complykit-allow comment', () => {
+    const source = `
+export default function Page() {
+  // complykit-allow
+  return <script dangerouslySetInnerHTML={{ __html: \`document.cookie = "x=1";\` }} />;
+}
+`
+    const result = scanFileAST('page.tsx', source)
+    expect(result).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Graceful parse failure fallback
 // ---------------------------------------------------------------------------
 
