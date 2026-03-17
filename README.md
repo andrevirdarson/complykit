@@ -1,6 +1,6 @@
 # complykit
 
-[![Build and Test](https://github.com/andrevirdarson/complykit/actions/workflows/complykit.yml/badge.svg)](https://github.com/andrevirdarson/complykit/actions/workflows/complykit.yml)
+[![Build and Test](https://github.com/andrevirdarson/complykit/actions/workflows/ci.yml/badge.svg)](https://github.com/andrevirdarson/complykit/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/andrevirdarson/complykit)](LICENSE)
 
 A CI-friendly cookie compliance checker that detects cookies set before user consent — via **static code analysis** and **live browser audits**.
