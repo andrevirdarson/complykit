@@ -237,6 +237,15 @@ describe('parse failure fallback', () => {
     expect(result).toHaveLength(1)
     expect(result[0]?.message).toContain('Set-Cookie')
   })
+
+  it('retries .js files in script mode before falling back to text scan', () => {
+    // `let await` is valid in script mode but a parse error in module mode.
+    // A .js file using this pattern must still have its cookie violations detected via AST.
+    const source = `let await = 1;\ndocument.cookie = "x=1";`
+    const result = scanFileAST('legacy.js', source)
+    expect(result).toHaveLength(1)
+    expect(result[0]?.message).toContain('document.cookie')
+  })
 })
 
 // ---------------------------------------------------------------------------

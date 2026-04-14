@@ -247,21 +247,24 @@ export function scanFileAST(filePath: string, source: string): ScanViolation[] {
   const violations: ScanViolation[] = []
   const suppressed = buildSuppressedLines(source)
 
-  // Use script mode for CommonJS files; everything else is treated as a module.
-  const sourceType = filePath.endsWith('.cjs') ? 'script' : 'module'
+  // .cjs is always CommonJS (script mode). .js/.ts/.tsx try module first, then script as fallback
+  // because plain .js files are often CommonJS and may use syntax that is only valid in sloppy mode.
+  const primarySourceType: 'module' | 'script' = filePath.endsWith('.cjs') ? 'script' : 'module'
+  const retryAsScript =
+    primarySourceType === 'module' &&
+    (filePath.endsWith('.js') || filePath.endsWith('.ts') || filePath.endsWith('.tsx'))
 
-  let ast: OxcNode
-  try {
-    const result = parseSync(filePath, source, { sourceType })
-    if (result.errors?.length) {
-      // Surface the parse failure so callers aren't silently missing violations.
-      console.warn(
-        `[complykit] parse errors in ${filePath} — falling back to text scan (AST violations may be missed)`,
-      )
-      return scanFileText(filePath, source)
+  function tryParseAST(sourceType: 'module' | 'script'): OxcNode | null {
+    try {
+      const result = parseSync(filePath, source, { sourceType })
+      return result.errors?.length ? null : result.program
+    } catch {
+      return null
     }
-    ast = result.program
-  } catch {
+  }
+
+  const ast = tryParseAST(primarySourceType) ?? (retryAsScript ? tryParseAST('script') : null)
+  if (ast === null) {
     console.warn(
       `[complykit] failed to parse ${filePath} — falling back to text scan (AST violations may be missed)`,
     )
