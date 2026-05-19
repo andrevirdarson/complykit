@@ -226,6 +226,399 @@ export default function Page() {
 })
 
 // ---------------------------------------------------------------------------
+// Consent guard recognition
+// ---------------------------------------------------------------------------
+//
+// The scanner is vendor-agnostic. The only built-in matcher is OneTrust's
+// idiomatic group-membership check (`OnetrustActiveGroups.indexOf(...)` and
+// `.includes(...)`). Everything else — Cookiebot, Osano, project-specific
+// names — is opt-in via `consentGuards` config and exercised through the
+// third argument to `scanFileAST` in these tests.
+
+describe('consent guard — OneTrust group membership (built-in)', () => {
+  it('does not flag indexOf(x) !== -1', () => {
+    const source = `
+if (OnetrustActiveGroups.indexOf(',C0002,') !== -1) {
+  document.cookie = "_ga=1";
+}
+`
+    expect(scanFileAST('test.ts', source)).toHaveLength(0)
+  })
+
+  it('does not flag indexOf(x) > -1', () => {
+    const source = `
+if (OnetrustActiveGroups.indexOf('C0002') > -1) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source)).toHaveLength(0)
+  })
+
+  it('does not flag indexOf(x) >= 0', () => {
+    const source = `
+if (OnetrustActiveGroups.indexOf('C0002') >= 0) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source)).toHaveLength(0)
+  })
+
+  it('does not flag indexOf(x) != -1 (loose equality)', () => {
+    const source = `
+if (OnetrustActiveGroups.indexOf('C0002') != -1) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source)).toHaveLength(0)
+  })
+
+  it('does not flag .includes(x)', () => {
+    const source = `
+if (OnetrustActiveGroups.includes('C0002')) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source)).toHaveLength(0)
+  })
+
+  it('does not flag the reversed comparison -1 !== indexOf(x)', () => {
+    const source = `
+if (-1 !== OnetrustActiveGroups.indexOf('C0002')) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source)).toHaveLength(0)
+  })
+
+  it('does not flag window.OnetrustActiveGroups.indexOf(...) !== -1', () => {
+    const source = `
+if (window.OnetrustActiveGroups.indexOf('C0002') !== -1) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source)).toHaveLength(0)
+  })
+
+  it('flags indexOf(x) === -1 — the "not found" form is not a positive guard', () => {
+    const source = `
+if (OnetrustActiveGroups.indexOf('C0002') === -1) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source)).toHaveLength(1)
+  })
+
+  it('flags bare OnetrustActiveGroups existence check', () => {
+    const source = `
+if (OnetrustActiveGroups) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source)).toHaveLength(1)
+  })
+
+  it('flags OneTrust.IsAlertBoxClosed() — dismissal is not consent', () => {
+    const source = `
+if (OneTrust.IsAlertBoxClosed()) {
+  localStorage.setItem('uid', '1');
+}
+`
+    expect(scanFileAST('test.ts', source)).toHaveLength(1)
+  })
+
+  it('flags .includes() with an empty-string argument (always-true)', () => {
+    const source = `
+if (OnetrustActiveGroups.includes('')) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source)).toHaveLength(1)
+  })
+
+  it('flags .indexOf("") !== -1 (always-true)', () => {
+    const source = `
+if (OnetrustActiveGroups.indexOf('') !== -1) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source)).toHaveLength(1)
+  })
+
+  it('flags .includes() with no argument', () => {
+    const source = `
+if (OnetrustActiveGroups.includes()) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source)).toHaveLength(1)
+  })
+
+  it('still suppresses when the group ID is a variable (cannot statically verify)', () => {
+    const source = `
+if (OnetrustActiveGroups.includes(groupId)) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source)).toHaveLength(0)
+  })
+})
+
+describe('consent guard — strictness', () => {
+  const GUARDS = ['Cookiebot.consent.marketing']
+
+  it('flags violation in the else branch of a consent guard', () => {
+    const source = `
+if (Cookiebot.consent.marketing) {
+  // allowed branch
+} else {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source, GUARDS)).toHaveLength(1)
+  })
+
+  it('flags violation inside if (!guard) — negation is not a positive guard', () => {
+    const source = `
+if (!Cookiebot.consent.marketing) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source, GUARDS)).toHaveLength(1)
+  })
+
+  it('flags violation guarded only by ||', () => {
+    const source = `
+if (debug || Cookiebot.consent.marketing) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source, GUARDS)).toHaveLength(1)
+  })
+
+  it('does not flag when guard is one operand of an && chain', () => {
+    const source = `
+if (someFlag && Cookiebot.consent.marketing) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source, GUARDS)).toHaveLength(0)
+  })
+
+  it('flags early-return pattern (no lexical guard)', () => {
+    const source = `
+function track() {
+  if (!Cookiebot.consent.marketing) return;
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source, GUARDS)).toHaveLength(1)
+  })
+
+  it('does not match identifiers not listed in consentGuards', () => {
+    const source = `
+if (hasConsent) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source, GUARDS)).toHaveLength(1)
+  })
+})
+
+describe('consent guard — function boundaries', () => {
+  const GUARDS = ['Cookiebot.consent.marketing']
+
+  it('flags a write inside a nested arrow function even under a guard', () => {
+    const source = `
+if (Cookiebot.consent.marketing) {
+  setTimeout(() => {
+    document.cookie = "x=1";
+  }, 60000);
+}
+`
+    expect(scanFileAST('test.ts', source, GUARDS)).toHaveLength(1)
+  })
+
+  it('flags a write inside a nested function expression even under a guard', () => {
+    const source = `
+if (Cookiebot.consent.marketing) {
+  doAsync(function () {
+    document.cookie = "x=1";
+  });
+}
+`
+    expect(scanFileAST('test.ts', source, GUARDS)).toHaveLength(1)
+  })
+
+  it('does not flag synchronous writes directly inside the guard', () => {
+    const source = `
+if (Cookiebot.consent.marketing) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source, GUARDS)).toHaveLength(0)
+  })
+
+  it('still respects a guard placed inside the nested function', () => {
+    const source = `
+setTimeout(() => {
+  if (Cookiebot.consent.marketing) {
+    document.cookie = "x=1";
+  }
+}, 1000);
+`
+    expect(scanFileAST('test.ts', source, GUARDS)).toHaveLength(0)
+  })
+})
+
+describe('consent guard — configured names', () => {
+  it('respects a bare identifier name from consentGuards', () => {
+    const source = `
+if (hasMarketingConsent) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source, ['hasMarketingConsent'])).toHaveLength(0)
+  })
+
+  it('respects a dotted member chain from consentGuards', () => {
+    const source = `
+if (user.consent.analytics) {
+  localStorage.setItem('uid', '1');
+}
+`
+    expect(scanFileAST('test.ts', source, ['user.consent.analytics'])).toHaveLength(0)
+  })
+
+  it('does not match when only a prefix of the chain is configured', () => {
+    const source = `
+if (user.consent) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source, ['user.consent.analytics'])).toHaveLength(1)
+  })
+
+  it('does not match a longer chain when only the root is configured (no wildcard)', () => {
+    // Strict exact match: configuring 'gtag' does NOT suppress writes guarded
+    // by `gtag.consent.granted`. The user must opt in to root-wildcard
+    // behavior with the explicit `.*` syntax.
+    const source = `
+if (gtag.consent.granted) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source, ['gtag'])).toHaveLength(1)
+  })
+
+  it('matches a longer chain when the pattern uses .* wildcard', () => {
+    const source = `
+if (gtag.consent.granted) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source, ['gtag.*'])).toHaveLength(0)
+  })
+
+  it('.* wildcard also matches the bare root', () => {
+    const source = `
+if (gtag) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source, ['gtag.*'])).toHaveLength(0)
+  })
+
+  it('.* wildcard requires the root to match exactly (no cross-root suppression)', () => {
+    const source = `
+if (window.gtag.consent.granted) {
+  document.cookie = "x=1";
+}
+`
+    // 'gtag.*' covers `gtag`/`gtag.*`, not `window.gtag.*` — user adds both.
+    expect(scanFileAST('test.ts', source, ['gtag.*'])).toHaveLength(1)
+    expect(scanFileAST('test.ts', source, ['window.gtag.*'])).toHaveLength(0)
+  })
+
+  it('bare OneTrust does not suppress unrelated method calls (the architecture concern)', () => {
+    // Without explicit wildcard, `consentGuards: ['OneTrust']` is just an
+    // identifier match. It will NOT suppress OneTrust.IsAlertBoxClosed().
+    const source = `
+if (OneTrust.IsAlertBoxClosed()) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source, ['OneTrust'])).toHaveLength(1)
+  })
+
+  it('matches a configured call-chain (e.g. User.hasConsent())', () => {
+    // The High-finding case: configuring 'User.hasConsent' should match
+    // `if (User.hasConsent())`, not just bare 'User'.
+    const source = `
+if (User.hasConsent()) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source, ['User.hasConsent'])).toHaveLength(0)
+  })
+
+  it('matches a configured bare function call', () => {
+    const source = `
+if (hasConsent()) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source, ['hasConsent'])).toHaveLength(0)
+  })
+
+  it('does not match a different sibling call on the same root', () => {
+    // `User.hasConsent` configured, but the code calls `User.isLoggedIn()`.
+    // Strict match: root 'User' is the same but full chain differs, and we
+    // require an exact match on either root or chain — root alone won't pull
+    // in unrelated methods because 'User' isn't the configured value.
+    const source = `
+if (User.isLoggedIn()) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source, ['User.hasConsent'])).toHaveLength(1)
+  })
+})
+
+describe('consent guard — syntactic wrappers', () => {
+  const GUARDS = ['Cookiebot.consent.marketing']
+
+  it('unwraps parentheses around the guard expression', () => {
+    const source = `
+if ((Cookiebot.consent.marketing)) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source, GUARDS)).toHaveLength(0)
+  })
+
+  it('unwraps optional chaining (?.) in the guard expression', () => {
+    const source = `
+if (window.Cookiebot?.consent.marketing) {
+  document.cookie = "x=1";
+}
+`
+    // Note: window.Cookiebot?.consent.marketing → chain "window.Cookiebot.consent.marketing",
+    // which has root 'window' (no match) and chain doesn't equal the configured guard.
+    // To suppress the user would configure 'window.Cookiebot.consent.marketing'.
+    expect(scanFileAST('test.ts', source, ['window.Cookiebot.consent.marketing'])).toHaveLength(0)
+  })
+
+  it('unwraps optional chaining at the top level', () => {
+    const source = `
+if (Cookiebot?.consent.marketing) {
+  document.cookie = "x=1";
+}
+`
+    expect(scanFileAST('test.ts', source, GUARDS)).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Graceful parse failure fallback
 // ---------------------------------------------------------------------------
 

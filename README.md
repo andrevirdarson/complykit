@@ -92,6 +92,43 @@ localStorage.setItem("theme", "dark");
 
 For the browser audit, use the `allowedBeforeConsent` list in `complykit.yml` to permit known functional cookies.
 
+### Consent guards
+
+Writes inside a recognized consent check are treated as compliant — no `// complykit-allow` needed. The scanner is vendor-agnostic: you list the expressions that count as a positive consent check in `consentGuards`, and one built-in matcher handles OneTrust's array-membership idiom.
+
+**Built-in: OneTrust group membership.** These forms are recognized without any config:
+
+```ts
+if (OnetrustActiveGroups.indexOf(',C0002,') !== -1) { document.cookie = "_ga=1" }  // ok
+if (OnetrustActiveGroups.includes('C0002')) { document.cookie = "_ga=1" }          // ok
+```
+
+Existence-only forms like `if (OnetrustActiveGroups)` or `if (OneTrust.IsAlertBoxClosed())` are intentionally **not** matched — they prove the CMP is loaded or dismissed, not that consent was granted.
+
+**`consentGuards` for every other vendor.** Add the exact expressions you actually use:
+
+```yaml
+consentGuards:
+  # Cookiebot
+  - Cookiebot.consent.marketing
+  - Cookiebot.consent.statistics
+  - Cookiebot.consented
+  # Osano
+  - Osano.cm.marketing
+  - Osano.cm.analytics
+  # Project-specific
+  - hasMarketingConsent          # matches `if (hasMarketingConsent) ...`
+  - user.consent.analytics       # matches the exact member chain
+  - User.hasConsent              # matches `if (User.hasConsent()) ...` too
+  - gtag.*                       # matches anything rooted at gtag (wildcard)
+```
+
+Matching is exact by default. A trailing `.*` makes it a root wildcard covering the prefix and any deeper chain (`gtag.*` matches `gtag`, `gtag.consent`, `gtag.consent.granted`, …). The wildcard form is opt-in so `OneTrust` alone won't silently cover `OneTrust.IsAlertBoxClosed()`.
+
+For optional chaining and parens (`window.Cookiebot?.consent.marketing`, `((x))`), the wrapper is stripped before matching.
+
+**Strictness.** Only the positive branch of an `if` / ternary / `&&` counts; `||`, negation (`if (!x)`), early-return patterns, and writes inside nested functions (callbacks, `setTimeout`) are still flagged.
+
 ## Output formats
 
 Both commands support `--format pretty|json|sarif` (default: `pretty`).

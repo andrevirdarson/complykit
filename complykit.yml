@@ -9,3 +9,23 @@ allowedBeforeConsent:
 # Pages the audit command will visit (relative paths, appended to the base URL).
 crawlPages:
   - /
+
+# Identifier or member-chain names that count as a positive consent check.
+# A cookie/storage write inside `if (<name>) { ... }`, a ternary consequent,
+# or the right operand of `<name> && ...` is treated as compliant.
+#
+# Only OneTrust's `OnetrustActiveGroups.indexOf(...)` / `.includes(...)`
+# pattern is recognized without config. For every other vendor — Cookiebot,
+# Osano, project-specific flags — add the exact expressions here.
+#
+# Matching is exact by default. A trailing `.*` makes it a root wildcard
+# covering the prefix and any deeper chain (`gtag.*` matches `gtag`,
+# `gtag.consent`, `gtag.consent.granted`, etc.).
+# consentGuards:
+#   - Cookiebot.consent.marketing
+#   - Cookiebot.consented
+#   - Osano.cm.marketing
+#   - hasMarketingConsent
+#   - user.consent.analytics
+#   - User.hasConsent
+#   - gtag.*

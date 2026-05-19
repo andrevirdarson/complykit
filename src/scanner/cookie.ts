@@ -63,15 +63,30 @@ const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', '.next', 'out', 'buil
 
 type OxcNode = Record<string, any>
 
-function walk(node: OxcNode, visit: (node: OxcNode) => void): void {
+// A walker frame records the parent node and the property key under which we
+// descended to reach the current node (e.g. childKey === 'consequent' means we
+// entered through the positive branch of an IfStatement). The childKey lets us
+// distinguish guarded positions (`if (consent) X`) from unguarded ones
+// (`if (consent) {} else { X }`).
+type Frame = { node: OxcNode; childKey: string }
+
+function walk(
+  node: OxcNode,
+  visit: (node: OxcNode, ancestors: Frame[]) => void,
+  ancestors: Frame[] = [],
+): void {
   if (!node || typeof node !== 'object') return
-  visit(node)
-  for (const value of Object.values(node)) {
-    if (Array.isArray(value)) {
-      for (const child of value) walk(child, visit)
-    } else if (value && typeof value === 'object' && 'type' in value) {
-      walk(value as OxcNode, visit)
+  visit(node, ancestors)
+  for (const [key, value] of Object.entries(node)) {
+    const descend = (child: any) => {
+      if (child && typeof child === 'object' && 'type' in child) {
+        ancestors.push({ node, childKey: key })
+        walk(child as OxcNode, visit, ancestors)
+        ancestors.pop()
+      }
     }
+    if (Array.isArray(value)) value.forEach(descend)
+    else descend(value)
   }
 }
 
@@ -202,6 +217,216 @@ function isTrackerSrcAssignment(node: OxcNode): boolean {
   return val !== null && isTrackerUrl(val)
 }
 
+// ---------------------------------------------------------------------------
+// Consent guards
+// ---------------------------------------------------------------------------
+//
+// A violation is suppressed when it sits in the *positive* branch of a control
+// flow expression whose test matches a recognized consent check — either the
+// built-in OneTrust group-membership pattern, or an identifier/member chain
+// listed in the project's `consentGuards` config. The matching is
+// intentionally strict — no fuzzy regex on identifier names, no early-return
+// inference, no implicit existence checks. If a project's consent flag
+// doesn't match, the user adds the name to `consentGuards` or uses
+// `// complykit-allow`.
+
+const GLOBAL_PREFIXES = ['window.', 'globalThis.', 'self.']
+
+function stripGlobalPrefix(chain: string): string {
+  for (const prefix of GLOBAL_PREFIXES) {
+    if (chain.startsWith(prefix)) return chain.slice(prefix.length)
+  }
+  return chain
+}
+
+// Strip syntactic wrappers that don't change the value: `(x)` and `x?.y`
+// (oxc-parser wraps optional-chain expressions in a ChainExpression node).
+function unwrap(node: OxcNode): OxcNode {
+  let current = node
+  while (
+    current &&
+    (current.type === 'ParenthesizedExpression' || current.type === 'ChainExpression')
+  ) {
+    current = current.expression
+  }
+  return current
+}
+
+// Dotted member chain for non-computed access, else null. Handles optional
+// chaining (`a?.b.c`) because the leading ChainExpression is unwrapped here.
+// `user.consent.analytics` → 'user.consent.analytics'.
+function getMemberChain(node: OxcNode | null | undefined): string | null {
+  if (!node) return null
+  const n = unwrap(node)
+  if (n.type === 'Identifier') return n.name ?? null
+  if (n.type === 'MemberExpression' && !n.computed) {
+    const base = getMemberChain(n.object)
+    const prop = n.property?.name
+    return base && prop ? `${base}.${prop}` : null
+  }
+  return null
+}
+
+// Chain of a CallExpression's callee, so `consentGuards: ['User.hasConsent']`
+// matches `if (User.hasConsent()) { ... }`. Returns null for anything that
+// isn't a call.
+function getCalleeChain(node: OxcNode | null | undefined): string | null {
+  if (!node) return null
+  const n = unwrap(node)
+  if (n.type !== 'CallExpression') return null
+  return getMemberChain(n.callee)
+}
+
+// OneTrust's canonical consent check is array-membership on the active-groups
+// string, not a simple chain. The standard idioms are:
+//   OnetrustActiveGroups.indexOf('C0002') !== -1   // also !=, > -1, >= 0
+//   OnetrustActiveGroups.includes('C0002')         // post-ES7
+// We recognize these as positive guards. Existence-only forms like
+// `if (OnetrustActiveGroups)` are intentionally NOT matched — they prove the
+// variable is set, not that consent was granted for any specific group.
+function numericLiteralValue(node: OxcNode | null | undefined): number | null {
+  if (!node) return null
+  if (
+    (node.type === 'Literal' || node.type === 'NumericLiteral') &&
+    typeof node.value === 'number'
+  ) {
+    return node.value
+  }
+  // oxc-parser may represent `-1` as UnaryExpression('-', Literal(1)).
+  if (node.type === 'UnaryExpression' && node.operator === '-') {
+    const inner = numericLiteralValue(node.argument)
+    return inner === null ? null : -inner
+  }
+  return null
+}
+
+// An empty-string group ID makes both `.indexOf('')` (returns 0) and
+// `.includes('')` (returns true) trivially "found", so the guard would always
+// pass. We require at least one argument and, when the first arg is a string
+// literal, that it's non-empty. Variable or computed arguments pass through
+// because we can't determine their value statically.
+function hasValidGroupArgument(call: OxcNode): boolean {
+  const args = call.arguments
+  if (!Array.isArray(args) || args.length < 1) return false
+  const first = args[0]
+  if (
+    (first?.type === 'Literal' || first?.type === 'StringLiteral') &&
+    typeof first.value === 'string'
+  ) {
+    return first.value.length > 0
+  }
+  if (first?.type === 'TemplateLiteral' && first.quasis?.length === 1) {
+    const raw = first.quasis[0]?.value?.raw ?? first.quasis[0]?.value?.cooked ?? ''
+    return raw.length > 0
+  }
+  return true
+}
+
+function isOnetrustActiveGroupsMethodCall(node: OxcNode, method: 'indexOf' | 'includes'): boolean {
+  const n = unwrap(node)
+  if (n.type !== 'CallExpression') return false
+  const callee = n.callee
+  if (callee?.type !== 'MemberExpression' || callee.computed) return false
+  if (callee.property?.name !== method) return false
+  const objectChain = getMemberChain(callee.object)
+  if (objectChain === null || stripGlobalPrefix(objectChain) !== 'OnetrustActiveGroups') {
+    return false
+  }
+  return hasValidGroupArgument(n)
+}
+
+function isOneTrustGroupCheck(expr: OxcNode): boolean {
+  // Post-ES7: `OnetrustActiveGroups.includes(...)` is truthy on hit.
+  if (isOnetrustActiveGroupsMethodCall(expr, 'includes')) return true
+  // Legacy: `OnetrustActiveGroups.indexOf(...) <op> <n>` — accept the four
+  // standard "found" comparisons. `=== -1` (the "not found" form) is NOT a
+  // positive guard.
+  if (expr.type !== 'BinaryExpression') return false
+  const { operator, left, right } = expr
+  const accept = (call: OxcNode, lit: OxcNode, op: string): boolean => {
+    if (!isOnetrustActiveGroupsMethodCall(call, 'indexOf')) return false
+    const n = numericLiteralValue(lit)
+    if (n === null) return false
+    if ((op === '!==' || op === '!=') && n === -1) return true
+    if (op === '>' && n === -1) return true
+    if (op === '>=' && n === 0) return true
+    return false
+  }
+  // Forms with the call on the left (the idiomatic order).
+  if (accept(left, right, operator)) return true
+  // Forms with the call on the right (e.g. `-1 !== indexOf(x)`).
+  const flipped = operator === '<' ? '>' : operator === '<=' ? '>=' : operator
+  return accept(right, left, flipped)
+}
+
+// A configured guard pattern matches a chain either exactly, or — when the
+// pattern ends in `.*` — as a root wildcard covering the prefix and any
+// deeper chain. Wildcards are opt-in so a bare `OneTrust` in `consentGuards`
+// does NOT silently suppress unrelated method calls on the same root.
+//   'hasConsent'        ↔ exactly `hasConsent`
+//   'User.hasConsent'   ↔ exactly `User.hasConsent` (also `User.hasConsent()`)
+//   'gtag.*'            ↔ `gtag`, `gtag.x`, `gtag.x.y`, etc.
+function chainMatchesPattern(chain: string, pattern: string): boolean {
+  if (pattern.endsWith('.*')) {
+    const prefix = pattern.slice(0, -2)
+    return chain === prefix || chain.startsWith(`${prefix}.`)
+  }
+  return chain === pattern
+}
+
+function expressionIsGuard(expr: OxcNode | undefined, extraNames: string[]): boolean {
+  if (!expr) return false
+  const e = unwrap(expr)
+  // Negation is not a positive guard. `if (!hasConsent) ...` does not protect
+  // its consequent — the guard pattern is `if (hasConsent) ...`.
+  if (e.type === 'UnaryExpression' && e.operator === '!') return false
+  if (isOneTrustGroupCheck(e)) return true
+  const chain = getMemberChain(e) ?? getCalleeChain(e)
+  if (chain === null) return false
+  return extraNames.some((pattern) => chainMatchesPattern(chain, pattern))
+}
+
+// Descend into `&&` chains only — `||` does not guarantee the right side runs
+// under consent, so we treat it as no guard.
+function testIsGuard(test: OxcNode | undefined, extraNames: string[]): boolean {
+  if (!test) return false
+  const t = unwrap(test)
+  if (t.type === 'LogicalExpression' && t.operator === '&&') {
+    return testIsGuard(t.left, extraNames) || testIsGuard(t.right, extraNames)
+  }
+  return expressionIsGuard(t, extraNames)
+}
+
+// Crossing a function boundary breaks the guard chain. The cookie write in
+// `if (consent) setTimeout(() => document.cookie = "x", 60_000)` runs
+// asynchronously — by the time the callback fires, consent may have been
+// withdrawn. Strict mode treats only synchronous, same-scope guards as valid.
+const FUNCTION_BOUNDARIES = new Set([
+  'FunctionDeclaration',
+  'FunctionExpression',
+  'ArrowFunctionExpression',
+])
+
+function isGuardedByConsent(ancestors: Frame[], extraNames: string[]): boolean {
+  for (let i = ancestors.length - 1; i >= 0; i--) {
+    const { node, childKey } = ancestors[i]!
+    if (FUNCTION_BOUNDARIES.has(node.type)) return false
+    if (
+      (node.type === 'IfStatement' || node.type === 'ConditionalExpression') &&
+      childKey === 'consequent'
+    ) {
+      if (testIsGuard(node.test, extraNames)) return true
+    } else if (
+      node.type === 'LogicalExpression' &&
+      node.operator === '&&' &&
+      childKey === 'right'
+    ) {
+      if (testIsGuard(node.left, extraNames)) return true
+    }
+  }
+  return false
+}
+
 // Build a set of 1-based line numbers that are covered by a `// complykit-allow` comment.
 // Exported for testing.
 // Two forms are supported:
@@ -243,7 +468,11 @@ function tryGetViolation(node: OxcNode): string | null {
   return null
 }
 
-export function scanFileAST(filePath: string, source: string): ScanViolation[] {
+export function scanFileAST(
+  filePath: string,
+  source: string,
+  consentGuards: string[] = [],
+): ScanViolation[] {
   const violations: ScanViolation[] = []
   const suppressed = buildSuppressedLines(source)
 
@@ -271,21 +500,21 @@ export function scanFileAST(filePath: string, source: string): ScanViolation[] {
     return scanFileText(filePath, source)
   }
 
-  walk(ast, (node) => {
+  walk(ast, (node, ancestors) => {
     const { line, column } = offsetToLineCol(source, node.start ?? 0)
     if (suppressed.has(line)) return
 
     const violation = tryGetViolation(node)
+    if (!violation) return
+    if (isGuardedByConsent(ancestors, consentGuards)) return
 
-    if (violation) {
-      violations.push({
-        file: filePath,
-        line,
-        column,
-        message: violation,
-        snippet: getSourceSnippet(source, line),
-      })
-    }
+    violations.push({
+      file: filePath,
+      line,
+      column,
+      message: violation,
+      snippet: getSourceSnippet(source, line),
+    })
   })
 
   return violations
@@ -363,7 +592,15 @@ type ScanResult = {
   filesScanned: number
 }
 
-export async function scanDirectory(targetPath: string): Promise<ScanResult> {
+export type ScanOptions = {
+  consentGuards?: string[]
+}
+
+export async function scanDirectory(
+  targetPath: string,
+  options: ScanOptions = {},
+): Promise<ScanResult> {
+  const consentGuards = options.consentGuards ?? []
   const stat = statSync(resolve(process.cwd(), targetPath))
 
   let files: string[]
@@ -387,7 +624,7 @@ export async function scanDirectory(targetPath: string): Promise<ScanResult> {
     const rel = relative(process.cwd(), file)
 
     const fileViolations = AST_EXTENSIONS.has(ext)
-      ? scanFileAST(rel, source)
+      ? scanFileAST(rel, source, consentGuards)
       : scanFileText(rel, source)
 
     violations.push(...fileViolations)

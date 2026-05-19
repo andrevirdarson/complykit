@@ -30,14 +30,16 @@ function formatViolation(v: ScanViolation): string {
 }
 
 export async function runScan(targetPath: string, opts: ScanOpts): Promise<void> {
-  loadConfig(opts.config)
+  const config = loadConfig(opts.config)
 
   const format = opts.format ?? 'pretty'
   const isPretty = format === 'pretty'
 
   if (isPretty) console.log(`\nScanning: ${targetPath}\n`)
 
-  const { violations: allViolations, filesScanned } = await scanDirectory(targetPath)
+  const { violations: allViolations, filesScanned } = await scanDirectory(targetPath, {
+    consentGuards: config.consentGuards,
+  })
 
   // Baseline filtering
   let violations = allViolations
